@@ -18,6 +18,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install deps (apk)
+        shell: sh
+        run: |
+          set -e
+          sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.aliyun.com/alpine#g' /etc/apk/repositories
+          apk update
+          apk add --no-cache git ca-certificates curl tar xz
+
       - name: Get Go version from go.mod
         id: get_go_version
         shell: sh
@@ -35,43 +43,28 @@ jobs:
       - name: Fetch tags
         shell: sh
         run: |
-          # Ensure tags are available for `git describe` on the runner
           git fetch --tags --prune --force origin || true
 
       - name: Determine module and tag, then refresh sum.golang.org
         shell: sh
         run: |
           set -eux
-          
           cd ./v3
-
-          # Read module path from go.mod (works for typical go.mod files)
           module=$(awk '/^module /{print $2; exit}' go.mod)
           echo "Detected module: $module"
-
-          # Prefer this module's go.mod.
           module_go_version=$(awk '/^go /{print $2; exit}' go.mod || true)
           if [ -z "$module_go_version" ]; then
             module_go_version="${{ steps.get_go_version.outputs.go-version }}"
           fi
           echo "Using Go version: $module_go_version"
-
-          # Try to determine the tag from common CI environment variables
           tag=""
-          # If running on a ref like refs/tags/v1.2.3
           if [ -n "${GITHUB_REF:-}" ]; then
             tag=${GITHUB_REF#refs/tags/}
           fi
-
-          # Gitea or other runners may set release/tag-specific vars; try common fallbacks
           tag=${tag:-${GITEA_RELEASE_TAG:-${EVENT_RELEASE_TAG:-}}}
-
-          # If still empty, try to find an exact-match tag for the current commit
           if [ -z "$tag" ]; then
             tag=$(git describe --tags --exact-match 2>/dev/null || true)
           fi
-
-          # If still empty, fall back to the latest tag reachable from HEAD
           if [ -z "$tag" ]; then
             tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
           fi
@@ -82,8 +75,6 @@ jobs:
           fi
 
           echo "Refreshing gosumdb for $module@$tag"
-
-          # Ensure go is new enough for this module.
           if command -v go >/dev/null 2>&1; then
             current_go=$(go version | awk '{print $3}' | sed 's/^go//')
           else
@@ -116,9 +107,9 @@ jobs:
             echo "Installing Go $module_go_version because current is '$current_go'"
             arch=$(uname -m)
             case "$arch" in
-              x86_64|amd64) goarch="linux-amd64" ;;
-              aarch64|arm64) goarch="linux-arm64" ;;
-              *) goarch="linux-amd64" ;;
+              x86_64|amd64) goarch="amd64" ;;
+              aarch64|arm64) goarch="arm64" ;;
+              *) goarch="amd64" ;;
             esac
             url="https://mirrors.aliyun.com/golang/go${module_go_version}.linux-${goarch}.tar.gz"
             echo "Downloading: $url"
@@ -130,17 +121,10 @@ jobs:
           else
             echo "Existing go is sufficient: $current_go >= $module_go_version"
           fi
-
-          # Run go get from a temp module outside this repo.
           TMPDIR=$(mktemp -d)
           cd "$TMPDIR"
-          # Create a minimal temporary go.mod.
           printf '%s\n' 'module refresh-gosumdb-temp' '' "go $module_go_version" > go.mod
-
-          # Use a China-friendly GOPROXY but keep the official sumdb so sum.golang.org is contacted when reachable.
           env GOSUMDB=sum.golang.org GOPROXY=https://goproxy.cn,direct GOFLAGS='' go get "$module@$tag"
-
-          # Clean up
           cd - >/dev/null || true
           rm -rf "$TMPDIR"
 
